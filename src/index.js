@@ -1,6 +1,6 @@
-const Discord = require('discord.js');
+const { ChannelType, Client, EmbedBuilder, Events, GatewayIntentBits, VoiceChannel } = require('discord.js');
+const { getVoiceConnection, joinVoiceChannel } = require('@discordjs/voice');
 const dotenv = require('dotenv');
-const inquirer = require('inquirer');
 const portAudio = require('naudiodon');
 
 const createStream = require('./stream');
@@ -20,13 +20,21 @@ async function initialize() {
    *
    * @since 1.0.0
    */
-  const client = new Discord.Client();
+  const intents = [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildMessages
+  ];
+  const client = new Client(
+    {intents},
+  );
 
   /**
    * Audio device setup.
    *
    * @since 1.0.0
    */
+  inquirer = (await import('inquirer')).default;
   const { device: deviceName } = await inquirer.prompt([{
     type: 'list',
     name: 'device',
@@ -40,8 +48,9 @@ async function initialize() {
    *
    * @since 1.0.0
    */
-  client.on('ready', async () => {
-    let broadcast;
+  client.on(Events.ClientReady, async () => {
+    let player;
+    let voiceConnection;
 
     /**
      * Server ready signal.
@@ -51,12 +60,12 @@ async function initialize() {
     console.log('Server is ready ...');
 
     /**
-     * Create a device broadcast stream.
+     * Create a device player stream.
      *
      * @since 1.0.0
      */
     try {
-      broadcast = createStream(client, audioDevice);
+      player = createStream(client, audioDevice);
     } catch (error) {
       await client.user.setStatus('invisible');
 
@@ -77,16 +86,32 @@ async function initialize() {
      * @param {string} title   - Message embed title.
      * @param {string} content - Message embed content.
      *
-     * @returns {module:"discord.js".MessageEmbed}
+     * @returns {module:"discord.js".EmbedBuilder}
      *
      * @since 1.0.0
      */
-    const messageEmbedTemplate = (title, content) => new Discord.MessageEmbed()
+    const messageEmbedTemplate = (title, content) => new EmbedBuilder()
       .setColor('#7289da')
       .setTitle(title)
       .setDescription(content)
       .setTimestamp()
-      .setFooter('Discord Audio Stream Bot');
+      .setFooter({ text: 'Discord Audio Stream Bot' });
+
+    /**
+     * Get voice channel by name.
+     *
+     * @param {string} channel - Discord channel object.
+     * @param {string} content - Required channel name.
+     *
+     * @returns {module:"discord.js".VoiceChannel}
+     *
+     * @since 2.0.0
+     */
+    const getVoiceChannelByName = (channel, channelName) => {
+      return channel.guild.channels.cache.find(
+        (channel) => channel.type === ChannelType.GuildVoice && channel.name === channelName
+      );
+    };
 
     /**
      * Voice controller.
@@ -100,16 +125,18 @@ async function initialize() {
      */
     const voiceController = async (action, guild, channel, channelId = null) => {
       const voiceChannel = client.channels.cache.get(channelId);
-      const connectedTo = guild.me.voice.channel;
+      const connectedTo = guild.members.cache.get(client.user.id)?.voice.channel;
+      voiceConnection = getVoiceConnection(guild.id);
 
       if (
         (!voiceChannel && action !== 'stop')
-        || (voiceChannel && voiceChannel.type !== 'voice')
+        || (voiceChannel && voiceChannel.type !== ChannelType.GuildVoice)
       ) {
         console.error(`The voice channel (${channelId}) is invalid or does not exist ...`);
-
         await channel.send(
-          messageEmbedTemplate('Error', `The voice channel (${channelId}) is invalid or does not exist.`),
+          {
+            embeds: [messageEmbedTemplate('Error', `The voice channel (${channelId}) is invalid or does not exist.`)],
+          }
         );
 
         return;
@@ -117,36 +144,44 @@ async function initialize() {
 
       switch (action) {
         case 'play':
-          voiceChannel.join().then(async (connection) => {
-            console.log(`Connected to voice channel (${channelId}) ...`);
+          try {
+              const connection = joinVoiceChannel({
+                  channelId: voiceChannel.id,
+                  guildId: voiceChannel.guild.id,
+                  adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+              });
 
-            connection.play(broadcast);
+              console.log(`Connected to voice channel (${channelId}) ...`);
+              connection.subscribe(player);
 
-            await channel.send(
-              messageEmbedTemplate('Connected', `Now connected and streaming audio to <#${channelId}>`),
-            );
-          }).catch(async (error) => {
-            console.error(`${error.message.replace(/\\.$/, '')} ...`);
-
-            await channel.send(
-              messageEmbedTemplate('Error', `Cannot connect to voice channel (${channelId}). Check logs for more details.`),
-            );
-          });
+              await channel.send({
+                  embeds: [messageEmbedTemplate('Connected', `Now connected and streaming audio to <#${channelId}>`)],
+              });
+          } catch (error) {
+              console.error(`${error.message.replace(/\\.$/, '')} ...`);
+              await channel.send({
+                  embeds: [messageEmbedTemplate('Error', `Cannot connect to voice channel (${channelId}). Check logs for more details.`)],
+              });
+          }
           break;
         case 'stop':
-          if (connectedTo) {
-            broadcast.end();
-            connectedTo.leave();
+          if (voiceConnection) {
+            player.stop();
+            voiceConnection.destroy();
             console.log(`Disconnected from voice channel (${connectedTo.id}) ...`);
 
             await channel.send(
-              messageEmbedTemplate('Disconnected', `Now disconnected from <#${connectedTo.id}>`),
+              {
+                embeds: [messageEmbedTemplate('Disconnected', `Now disconnected from <#${connectedTo.id}>`)],
+              }
             );
           } else {
             console.log('Not connected to any voice channel ...');
 
             await channel.send(
-              messageEmbedTemplate('Error', 'Cannot disconnect from voice channel. Check logs for more details.'),
+              {
+                embeds: [messageEmbedTemplate('Error', 'Cannot disconnect from voice channel. Check logs for more details.')],
+              }
             );
           }
           break;
@@ -160,7 +195,7 @@ async function initialize() {
      *
      * @since 1.0.0
      */
-    client.on('message', async (message) => {
+    client.on(Events.MessageCreate, async (message) => {
       const {
         guild,
         channel,
@@ -181,37 +216,49 @@ async function initialize() {
 
         console.log('Displaying command help menu ...');
 
-        await channel.send(messageEmbedTemplate(
-          'Command Help Menu',
-          [
-            `\`@${mentionedUsername} help\`\nDisplay the help menu (this list)`,
-            `\`@${mentionedUsername} list\`\nSee a list of available voice channels`,
-            `\`@${mentionedUsername} play <channel id>\`\nJoin channel and start playing audio`,
-            `\`@${mentionedUsername} stop\`\nStop playing audio and leave channel`,
-          ].join('\n\n'),
-        ));
+        await channel.send(
+          {
+            embeds: [messageEmbedTemplate(
+              'Command Help Menu',
+              [
+                `\`@${mentionedUsername} help\`\nDisplay the help menu (this list)`,
+                `\`@${mentionedUsername} list\`\nSee a list of available voice channels`,
+                `\`@${mentionedUsername} play <channel id>\`\nJoin channel and start playing audio`,
+                `\`@${mentionedUsername} stop\`\nStop playing audio and leave channel`,
+              ].join('\n\n'),
+            )]
+          }
+        );
       }
 
       // Voice channel list.
       if (command === 'list') {
-        const voiceChannels = channel.guild.channels.cache.filter((theChannel) => theChannel.type === 'voice');
+        const voiceChannels = channel.guild.channels.cache.filter((theChannel) => theChannel.type === ChannelType.GuildVoice);
 
         console.log('Displaying voice channel list ...');
-
-        await channel.send(messageEmbedTemplate(
-          'Voice Channels List',
-          [
-            `Copy the channel IDs shown next to the channel names below for use with the \`join\`, \`play\`, \`stop\` commands. Please make sure these channels are viewable by ${username}.\n`,
-            ...voiceChannels.map((theChannel) => `${theChannel.name} ➜ \`${theChannel.id}\``),
-          ].join('\n'),
-        ));
+        await channel.send(
+          {
+            embeds: [messageEmbedTemplate(
+              'Voice Channels List',
+              [
+                `Use the channel name or ID below with the \`join\`, \`play\`, \`stop\` commands. Please make sure these channels are viewable by ${username}.\n`,
+                ...voiceChannels.map((theChannel) => `${theChannel.name} ➜ \`${theChannel.id}\``),
+              ].join('\n'),
+            )]
+          }
+        );
       }
 
       // Start playing in voice channel.
       if (command === 'play' && channelId) {
         console.log(`Connecting to voice channel (${channelId}) ...`);
+        let joinChannelId = channelId;
+        
+        if (!channelId.match(/^\d{18}$/g)) {
+          joinChannelId = getVoiceChannelByName(channel, channelId).id;
+        }
 
-        await voiceController('play', guild, channel, channelId);
+        await voiceController('play', guild, channel, joinChannelId);
       }
 
       // Stop playing in voice channel.
@@ -227,8 +274,19 @@ async function initialize() {
      *
      * @since 1.0.0
      */
-    process.on('SIGINT', async () => {
-      await client.user.setStatus('invisible');
+    process.on('SIGINT', () => {
+      console.log(`Setting status to invisible`);
+      client.user.setStatus('invisible');
+      console.log(`Leaving voice channels`);
+      client.guilds.cache.forEach(guild => {
+        const voiceConnection = getVoiceConnection(guild.id);
+        if (voiceConnection) {
+          voiceConnection.destroy();
+          console.log(`Left voice channel in guild: ${guild.name}`);
+        }
+      });
+      console.log(`Disconnecting from Discord`);
+      client.destroy();
 
       console.log('Stopping server ...');
       process.exit(130);

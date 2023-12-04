@@ -1,4 +1,10 @@
 const portAudio = require('naudiodon');
+const {
+  createAudioPlayer,
+  createAudioResource,
+  StreamType,
+  AudioPlayerStatus
+} = require('@discordjs/voice');
 
 /**
  * Create stream.
@@ -13,15 +19,13 @@ const portAudio = require('naudiodon');
  */
 module.exports = function createStream(client, device) {
   if (
-    device.maxInputChannels !== 2
-    || device.maxOutputChannels !== 0
-    || device.defaultSampleRate !== 48000
+    device.defaultSampleRate !== 48000
   ) {
     throw Error(`${device.name} is not a supported audio device ...`);
   }
 
   // Create the broadcast stream.
-  const broadcast = client.voice.createBroadcast();
+  const player = createAudioPlayer();
 
   // Create the audio device stream.
   const audio = new portAudio.AudioIO({
@@ -34,12 +38,19 @@ module.exports = function createStream(client, device) {
     },
   });
 
-  // Create a dispatcher for our audio stream.
-  broadcast.play(audio, {
-    type: 'converted',
+  // Create an audio resource from the audio input stream
+  const resource = createAudioResource(audio, {
+    inputType: StreamType.Raw
   });
+
+  // Create a dispatcher for our audio stream.
+  player.play(resource);
 
   audio.start();
 
-  return broadcast;
+  // Handle end of audio and errors
+  player.on(AudioPlayerStatus.Idle, () => connection.destroy());
+  player.on('error', error => console.error(error));
+
+  return player;
 };
